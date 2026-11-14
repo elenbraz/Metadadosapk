@@ -379,8 +379,8 @@ jobs:
 
           import android.content.Context
           import android.opengl.GLES20
-          import androidx.media3.common.GlEffect
-          import androidx.media3.common.GlShaderProgram
+          import androidx.media3.effect.GlEffect
+          import androidx.media3.effect.GlShaderProgram
           import androidx.media3.common.util.GlProgram
           import androidx.media3.common.util.GlUtil
           import androidx.media3.common.util.Size
@@ -1171,7 +1171,7 @@ jobs:
                           ?: throw IllegalStateException("sem acesso de escrita")
 
                       pfd.use {
-                          val muxer = MediaMuxer(it.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG4)
+                          val muxer = MediaMuxer(it.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                           try {
                               val mapa = HashMap<Int, Int>()
                               for (t in 0 until extrator.trackCount) {
