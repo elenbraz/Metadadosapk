@@ -1,0 +1,1265 @@
+name: Gerar APK
+
+# Este arquivo cria o projeto inteiro e gera o APK. Basta ele estar em
+# .github/workflows/build-apk.yml no seu repositorio.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Criar arquivos do projeto
+        run: |
+          mkdir -p proj && cd proj
+          mkdir -p app
+          cat > app/build.gradle.kts <<'FIM_ARQUIVO'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.exemplo.limpador"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.exemplo.limpador"
+                  minSdk = 29
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.activity:activity-ktx:1.9.0")
+              implementation("androidx.media3:media3-common:1.4.1")
+              implementation("androidx.media3:media3-transformer:1.4.1")
+              implementation("androidx.media3:media3-effect:1.4.1")
+              implementation("com.google.guava:guava:33.0.0-android")
+          }
+          FIM_ARQUIVO
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'FIM_ARQUIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+              <application
+                  android:label="Limpador de Metadados"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="video/*" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND_MULTIPLE" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="video/*" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ProcessamentoService"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
+              </application>
+          </manifest>
+          FIM_ARQUIVO
+          mkdir -p app/src/main/java/com/exemplo/limpador
+          cat > app/src/main/java/com/exemplo/limpador/Fila.kt <<'FIM_ARQUIVO'
+          package com.exemplo.limpador
+
+          import android.os.Handler
+          import android.os.Looper
+
+          /** Estado compartilhado entre o serviço (que processa) e a tela (que mostra). */
+          object Fila {
+              private val main = Handler(Looper.getMainLooper())
+
+              var texto: String = ""
+                  private set
+              var progresso: Int = 0
+                  private set
+              var ativo: Boolean = false
+                  private set
+              var ouvinte: (() -> Unit)? = null
+
+              private fun avisar() { ouvinte?.invoke() }
+
+              fun iniciar() {
+                  main.post { texto = ""; progresso = 0; ativo = true; avisar() }
+              }
+
+              fun log(msg: String) {
+                  main.post { texto += msg + "\n"; avisar() }
+              }
+
+              fun definirProgresso(p: Int) {
+                  main.post { progresso = p; avisar() }
+              }
+
+              fun fim() {
+                  main.post { ativo = false; avisar() }
+              }
+          }
+          FIM_ARQUIVO
+          mkdir -p app/src/main/java/com/exemplo/limpador
+          cat > app/src/main/java/com/exemplo/limpador/MainActivity.kt <<'FIM_ARQUIVO'
+          package com.exemplo.limpador
+
+          import android.Manifest
+          import android.content.ClipData
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.text.InputType
+          import android.view.View
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.RadioButton
+          import android.widget.RadioGroup
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.activity.ComponentActivity
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.core.content.ContextCompat
+          import androidx.core.content.IntentCompat
+          import java.io.File
+
+          class MainActivity : ComponentActivity() {
+
+              private lateinit var status: TextView
+              private lateinit var botao: Button
+              private lateinit var botaoRecebidos: Button
+              private lateinit var cancelar: Button
+              private lateinit var barra: ProgressBar
+              private lateinit var grupo: RadioGroup
+              private lateinit var nitidez: CheckBox
+              private lateinit var preencher: CheckBox
+              private lateinit var bordas: CheckBox
+              private lateinit var pausas: CheckBox
+              private lateinit var logo: CheckBox
+              private lateinit var legenda: EditText
+
+              // Vídeos recebidos pelo "Compartilhar", aguardando o toque em Processar.
+              private var recebidos: List<Uri> = emptyList()
+
+              private val prefs by lazy { getSharedPreferences("limpador", MODE_PRIVATE) }
+              private val arquivoLogo by lazy { File(filesDir, "logo.png") }
+
+              private val permissaoNotif =
+                  registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+              private val escolher = registerForActivityResult(
+                  ActivityResultContracts.OpenMultipleDocuments()
+              ) { uris -> if (uris.isNotEmpty()) iniciar(uris) }
+
+              private val escolherLogo = registerForActivityResult(
+                  ActivityResultContracts.GetContent()
+              ) { uri ->
+                  if (uri != null) {
+                      try {
+                          contentResolver.openInputStream(uri)?.use { entrada ->
+                              arquivoLogo.outputStream().use { saida -> entrada.copyTo(saida) }
+                          }
+                          logo.isEnabled = true
+                          logo.isChecked = true
+                          Toast.makeText(this, "Logo salvo", Toast.LENGTH_SHORT).show()
+                      } catch (e: Exception) {
+                          Toast.makeText(this, "Não consegui ler a imagem", Toast.LENGTH_LONG).show()
+                      }
+                  }
+              }
+
+              private fun caixa(rotulo: String, marcado: Boolean = false) =
+                  CheckBox(this).apply { text = rotulo; isChecked = marcado }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                      != PackageManager.PERMISSION_GRANTED
+                  ) permissaoNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
+
+                  val pad = (24 * resources.displayMetrics.density).toInt()
+                  val raiz = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad * 2, pad, pad)
+                  }
+                  raiz.addView(TextView(this).apply { text = "Limpador de Metadados"; textSize = 24f })
+                  raiz.addView(TextView(this).apply {
+                      text = "Remove GPS, modelo do aparelho e dados de edição dos SEUS vídeos. Salva em Filmes/Limpos. Continua em segundo plano."
+                      setPadding(0, pad / 2, 0, pad / 2)
+                  })
+
+                  grupo = RadioGroup(this)
+                  val opcoes = listOf(
+                      "Só limpar metadados (sem perda, rápido)" to 0,
+                      "Melhorar para Full HD (1080p) + limpar" to 1080,
+                      "Melhorar para 4K (2160p) + limpar" to 2160,
+                      "Reels/TikTok: vertical 1080x1920 + limpar" to -1
+                  )
+                  opcoes.forEachIndexed { i, (rotulo, valor) ->
+                      grupo.addView(RadioButton(this).apply {
+                          id = View.generateViewId()
+                          text = rotulo
+                          tag = valor
+                          isChecked = i == 1
+                      })
+                  }
+                  raiz.addView(grupo)
+
+                  nitidez = caixa("Aumentar nitidez (ao melhorar/ampliar)", true)
+                  preencher = caixa("Reels/TikTok: preencher a tela (corta o excesso)", true)
+                  bordas = caixa("Cortar bordas pretas ou coloridas")
+                  pausas = caixa("Cortar pausas sem fala")
+                  raiz.addView(nitidez)
+                  raiz.addView(preencher)
+                  raiz.addView(bordas)
+                  raiz.addView(pausas)
+
+                  raiz.addView(Button(this).apply {
+                      text = "Escolher meu logo (imagem)"
+                      setOnClickListener { escolherLogo.launch("image/*") }
+                  })
+                  logo = caixa("Colocar meu logo no canto superior esquerdo", arquivoLogo.exists()).apply {
+                      isEnabled = arquivoLogo.exists()
+                  }
+                  raiz.addView(logo)
+
+                  legenda = EditText(this).apply {
+                      hint = "Legenda fixa em todos os vídeos (opcional)"
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                      maxLines = 3
+                      setText(prefs.getString("legenda", ""))
+                  }
+                  raiz.addView(legenda)
+
+                  botaoRecebidos = Button(this).apply {
+                      visibility = View.GONE
+                      setOnClickListener {
+                          val lista = recebidos
+                          recebidos = emptyList()
+                          if (lista.isNotEmpty()) iniciar(lista)
+                      }
+                  }
+                  raiz.addView(botaoRecebidos)
+
+                  botao = Button(this).apply {
+                      text = "Escolher vídeos"
+                      setOnClickListener { escolher.launch(arrayOf("video/*")) }
+                  }
+                  raiz.addView(botao)
+
+                  barra = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                      max = 100
+                      visibility = View.GONE
+                  }
+                  raiz.addView(barra)
+
+                  cancelar = Button(this).apply {
+                      text = "Cancelar"
+                      visibility = View.GONE
+                      setOnClickListener {
+                          startService(
+                              Intent(this@MainActivity, ProcessamentoService::class.java)
+                                  .setAction(ProcessamentoService.ACAO_CANCELAR)
+                          )
+                      }
+                  }
+                  raiz.addView(cancelar)
+
+                  status = TextView(this).apply { setPadding(0, pad / 2, 0, 0) }
+                  raiz.addView(status)
+
+                  setContentView(ScrollView(this).apply { addView(raiz) })
+                  receberCompartilhado(intent)
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  receberCompartilhado(intent)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  Fila.ouvinte = { atualizar() }
+                  atualizar()
+              }
+
+              override fun onPause() {
+                  Fila.ouvinte = null
+                  super.onPause()
+              }
+
+              private fun receberCompartilhado(intent: Intent?) {
+                  if (intent == null) return
+                  val lista: List<Uri> = when (intent.action) {
+                      Intent.ACTION_SEND ->
+                          listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
+                      Intent.ACTION_SEND_MULTIPLE ->
+                          IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                              ?: emptyList()
+                      else -> return
+                  }
+                  if (lista.isEmpty()) return
+                  recebidos = lista
+                  atualizar()
+              }
+
+              private fun atualizar() {
+                  status.text = Fila.texto
+                  barra.progress = Fila.progresso
+                  barra.visibility = if (Fila.ativo) View.VISIBLE else View.GONE
+                  cancelar.visibility = if (Fila.ativo) View.VISIBLE else View.GONE
+                  botao.isEnabled = !Fila.ativo
+
+                  val n = recebidos.size
+                  botaoRecebidos.visibility = if (n > 0 && !Fila.ativo) View.VISIBLE else View.GONE
+                  botaoRecebidos.text = if (n == 1) "Processar 1 vídeo recebido" else "Processar $n vídeos recebidos"
+              }
+
+              private fun iniciar(uris: List<Uri>) {
+                  val alvo = findViewById<RadioButton>(grupo.checkedRadioButtonId).tag as Int
+                  val texto = legenda.text.toString().trim()
+                  prefs.edit().putString("legenda", texto).apply()
+                  Fila.iniciar()
+
+                  val clip = ClipData.newRawUri("videos", uris[0])
+                  for (u in uris.drop(1)) clip.addItem(ClipData.Item(u))
+
+                  val intent = Intent(this, ProcessamentoService::class.java)
+                      .putParcelableArrayListExtra("uris", ArrayList(uris))
+                      .putExtra("alvo", alvo)
+                      .putExtra("nitidez", nitidez.isChecked)
+                      .putExtra("preencher", preencher.isChecked)
+                      .putExtra("bordas", bordas.isChecked)
+                      .putExtra("pausas", pausas.isChecked)
+                      .putExtra("logo", logo.isChecked && arquivoLogo.exists())
+                      .putExtra("legenda", texto)
+                  intent.clipData = clip
+                  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  ContextCompat.startForegroundService(this, intent)
+              }
+          }
+          FIM_ARQUIVO
+          mkdir -p app/src/main/java/com/exemplo/limpador
+          cat > app/src/main/java/com/exemplo/limpador/Nitidez.kt <<'FIM_ARQUIVO'
+          package com.exemplo.limpador
+
+          import android.content.Context
+          import android.opengl.GLES20
+          import androidx.media3.common.GlEffect
+          import androidx.media3.common.GlShaderProgram
+          import androidx.media3.common.util.GlProgram
+          import androidx.media3.common.util.GlUtil
+          import androidx.media3.common.util.Size
+          import androidx.media3.common.util.UnstableApi
+          import androidx.media3.effect.BaseGlShaderProgram
+
+          /** Filtro de nitidez (unsharp mask) aplicado em cada quadro depois da ampliação. */
+          @UnstableApi
+          class NitidezEffect(private val forca: Float) : GlEffect {
+              override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
+                  NitidezShader(forca)
+          }
+
+          @UnstableApi
+          private class NitidezShader(private val forca: Float) : BaseGlShaderProgram(false, 1) {
+
+              private val programa = GlProgram(VERTEX, FRAGMENT)
+              private var largura = 1
+              private var altura = 1
+
+              override fun configure(inputWidth: Int, inputHeight: Int): Size {
+                  largura = inputWidth
+                  altura = inputHeight
+                  return Size(inputWidth, inputHeight)
+              }
+
+              override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+                  programa.use()
+                  programa.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
+                  programa.setFloatsUniform("uTexel", floatArrayOf(1f / largura, 1f / altura))
+                  programa.setFloatUniform("uForca", forca)
+                  programa.setBufferAttribute(
+                      "aFramePosition",
+                      GlUtil.getNormalizedCoordinateBounds(),
+                      GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE
+                  )
+                  programa.bindAttributesAndUniforms()
+                  GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+              }
+
+              override fun release() {
+                  super.release()
+                  programa.delete()
+              }
+
+              companion object {
+                  private const val VERTEX = """
+          attribute vec4 aFramePosition;
+          varying vec2 vTexSamplingCoord;
+          void main() {
+            gl_Position = aFramePosition;
+            vTexSamplingCoord = aFramePosition.xy * 0.5 + 0.5;
+          }
+          """
+                  private const val FRAGMENT = """
+          precision mediump float;
+          uniform sampler2D uTexSampler;
+          uniform vec2 uTexel;
+          uniform float uForca;
+          varying vec2 vTexSamplingCoord;
+          void main() {
+            vec4 c = texture2D(uTexSampler, vTexSamplingCoord);
+            vec4 b = texture2D(uTexSampler, vTexSamplingCoord + vec2(uTexel.x, 0.0))
+                   + texture2D(uTexSampler, vTexSamplingCoord - vec2(uTexel.x, 0.0))
+                   + texture2D(uTexSampler, vTexSamplingCoord + vec2(0.0, uTexel.y))
+                   + texture2D(uTexSampler, vTexSamplingCoord - vec2(0.0, uTexel.y));
+            b = b * 0.25;
+            vec3 nitido = c.rgb + uForca * (c.rgb - b.rgb);
+            gl_FragColor = vec4(clamp(nitido, 0.0, 1.0), c.a);
+          }
+          """
+              }
+          }
+          FIM_ARQUIVO
+          mkdir -p app/src/main/java/com/exemplo/limpador
+          cat > app/src/main/java/com/exemplo/limpador/ProcessamentoService.kt <<'FIM_ARQUIVO'
+          package com.exemplo.limpador
+
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.ContentValues
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Typeface
+          import android.media.MediaCodec
+          import android.media.MediaExtractor
+          import android.media.MediaMetadataRetriever
+          import android.media.MediaMuxer
+          import android.net.Uri
+          import android.os.Environment
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.os.PowerManager
+          import android.provider.MediaStore
+          import android.provider.OpenableColumns
+          import android.text.Layout
+          import android.text.StaticLayout
+          import android.text.TextPaint
+          import androidx.core.app.NotificationCompat
+          import androidx.core.app.ServiceCompat
+          import androidx.core.content.IntentCompat
+          import androidx.media3.common.Effect
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
+          import androidx.media3.common.util.UnstableApi
+          import androidx.media3.effect.BitmapOverlay
+          import androidx.media3.effect.Crop
+          import androidx.media3.effect.OverlayEffect
+          import androidx.media3.effect.Presentation
+          import androidx.media3.transformer.Composition
+          import androidx.media3.transformer.DefaultEncoderFactory
+          import androidx.media3.transformer.EditedMediaItem
+          import androidx.media3.transformer.EditedMediaItemSequence
+          import androidx.media3.transformer.Effects
+          import androidx.media3.transformer.ExportException
+          import androidx.media3.transformer.ExportResult
+          import androidx.media3.transformer.ProgressHolder
+          import androidx.media3.transformer.Transformer
+          import androidx.media3.transformer.VideoEncoderSettings
+          import com.google.common.collect.ImmutableList
+          import java.io.File
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.util.concurrent.CancellationException
+          import kotlin.concurrent.thread
+          import kotlin.math.abs
+          import kotlin.math.log10
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+
+          /** Opções escolhidas na tela. alvo: 0 = só limpar, 1080/2160 = melhorar, -1 = Reels/TikTok vertical. */
+          data class Opcoes(
+              val alvo: Int,
+              val nitidez: Boolean,
+              val preencher: Boolean,
+              val bordas: Boolean,
+              val pausas: Boolean,
+              val logo: Boolean,
+              val legenda: String
+          )
+
+          class Plano(
+              val segmentos: List<LongRange>?,   // trechos (ms) a manter; null = vídeo inteiro
+              val efeitos: List<Effect>,
+              val w: Int,
+              val h: Int
+          ) {
+              val vazio: Boolean get() = segmentos == null && efeitos.isEmpty()
+          }
+
+          private class Entrada(val w: Int, val h: Int, val duracaoMs: Long)
+          private class Recorte(val esq: Float, val dir: Float, val base: Float, val topo: Float)
+
+          @OptIn(UnstableApi::class)
+          class ProcessamentoService : Service() {
+
+              companion object {
+                  const val ACAO_CANCELAR = "com.exemplo.limpador.CANCELAR"
+                  private const val CANAL = "processamento"
+                  private const val ID_NOTIF = 1
+                  private const val ID_FINAL = 2
+              }
+
+              private val main = Handler(Looper.getMainLooper())
+              private var transformer: Transformer? = null
+              private var tempAtual: File? = null
+              private var polling = false
+              private var rodando = false
+              @Volatile private var cancelado = false
+              private var wakeLock: PowerManager.WakeLock? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == ACAO_CANCELAR) {
+                      cancelar()
+                      return START_NOT_STICKY
+                  }
+                  if (rodando) return START_NOT_STICKY
+                  val uris = intent?.let { IntentCompat.getParcelableArrayListExtra(it, "uris", Uri::class.java) }
+                  if (intent == null || uris.isNullOrEmpty()) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+
+                  val op = Opcoes(
+                      alvo = intent.getIntExtra("alvo", 0),
+                      nitidez = intent.getBooleanExtra("nitidez", true),
+                      preencher = intent.getBooleanExtra("preencher", true),
+                      bordas = intent.getBooleanExtra("bordas", false),
+                      pausas = intent.getBooleanExtra("pausas", false),
+                      logo = intent.getBooleanExtra("logo", false) && File(filesDir, "logo.png").exists(),
+                      legenda = intent.getStringExtra("legenda")?.trim() ?: ""
+                  )
+
+                  rodando = true
+                  cancelado = false
+                  criarCanal()
+                  ServiceCompat.startForeground(
+                      this, ID_NOTIF, notificacao("Preparando...", 0),
+                      ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                  )
+                  wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
+                      .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "limpador:proc")
+                      .apply { acquire(3 * 60 * 60 * 1000L) }
+
+                  processar(uris, 0, op, 0)
+                  return START_NOT_STICKY
+              }
+
+              // ---------- notificações ----------
+
+              private fun criarCanal() {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel(CANAL, "Processamento de vídeos", NotificationManager.IMPORTANCE_LOW)
+                  )
+              }
+
+              private fun abrirApp(): PendingIntent = PendingIntent.getActivity(
+                  this, 0,
+                  Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                  PendingIntent.FLAG_IMMUTABLE
+              )
+
+              private fun notificacao(texto: String, p: Int) = NotificationCompat.Builder(this, CANAL)
+                  .setSmallIcon(android.R.drawable.stat_sys_download)
+                  .setContentTitle("Limpador de Metadados")
+                  .setContentText(texto)
+                  .setOngoing(true)
+                  .setOnlyAlertOnce(true)
+                  .setProgress(100, p, false)
+                  .setContentIntent(abrirApp())
+                  .addAction(
+                      0, "Cancelar",
+                      PendingIntent.getService(
+                          this, 0,
+                          Intent(this, ProcessamentoService::class.java).setAction(ACAO_CANCELAR),
+                          PendingIntent.FLAG_IMMUTABLE
+                      )
+                  )
+                  .build()
+
+              private fun notificacaoFinal(texto: String) = NotificationCompat.Builder(this, CANAL)
+                  .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                  .setContentTitle("Limpador de Metadados")
+                  .setContentText(texto)
+                  .setAutoCancel(true)
+                  .setContentIntent(abrirApp())
+                  .build()
+
+              private fun progresso(i: Int, n: Int, f: Float, rotulo: String) {
+                  if (!rodando || cancelado) return
+                  val p = (((i + f) / n) * 100).toInt().coerceIn(0, 100)
+                  Fila.definirProgresso(p)
+                  getSystemService(NotificationManager::class.java).notify(ID_NOTIF, notificacao(rotulo, p))
+              }
+
+              // ---------- fila ----------
+
+              private fun processar(uris: List<Uri>, i: Int, op: Opcoes, ok: Int) {
+                  if (!rodando) return
+                  if (cancelado) { finalizar("Cancelado: $ok/${uris.size} concluídos."); return }
+                  if (i >= uris.size) { finalizar("Concluído: $ok/${uris.size} em Filmes/Limpos"); return }
+
+                  val n = uris.size
+                  val uri = uris[i]
+                  val nome = nomeDe(uri)
+                  val rotulo = "(${i + 1}/$n) $nome"
+                  Fila.log("$rotulo ...")
+                  progresso(i, n, 0f, rotulo)
+
+                  val proximo = { s: Boolean -> processar(uris, i + 1, op, if (s) ok + 1 else ok) }
+                  val recodificar = op.alvo != 0 || op.logo || op.legenda.isNotBlank() || op.bordas || op.pausas
+
+                  if (!recodificar) {
+                      limparAsync(uri, nome, { f -> progresso(i, n, f, rotulo) }, proximo)
+                  } else {
+                      melhorar(uri, nome, op, i, n, rotulo, proximo)
+                  }
+              }
+
+              private fun finalizar(msg: String) {
+                  if (!rodando) return
+                  rodando = false
+                  polling = false
+                  Fila.log(msg)
+                  Fila.fim()
+                  wakeLock?.let { if (it.isHeld) it.release() }
+                  stopForeground(STOP_FOREGROUND_REMOVE)
+                  getSystemService(NotificationManager::class.java).notify(ID_FINAL, notificacaoFinal(msg))
+                  stopSelf()
+              }
+
+              private fun cancelar() {
+                  if (!rodando || cancelado) return
+                  cancelado = true
+                  val t = transformer
+                  if (t != null) {
+                      polling = false
+                      t.cancel()
+                      transformer = null
+                      tempAtual?.delete()
+                      finalizar("Cancelado.")
+                  } else {
+                      Fila.log("Cancelando...")
+                  }
+              }
+
+              private fun nomeDe(uri: Uri): String =
+                  contentResolver.query(uri, null, null, null, null)?.use { c ->
+                      val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                      if (c.moveToFirst() && idx >= 0) c.getString(idx) else null
+                  } ?: "video"
+
+              // ---------- análise (roda em thread de fundo) ----------
+
+              private fun par(x: Int) = max(2, x - x % 2)
+
+              private fun lerEntrada(uri: Uri): Entrada {
+                  val r = MediaMetadataRetriever()
+                  try {
+                      r.setDataSource(this, uri)
+                      var w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)!!.toInt()
+                      var h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)!!.toInt()
+                      val rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                      if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
+                      val dur = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                      return Entrada(w, h, dur)
+                  } finally { r.release() }
+              }
+
+              // Altura de saída para o lado menor chegar ao alvo. Null = já está nessa resolução ou maior.
+              private fun alturaAlvo(w: Int, h: Int, alvo: Int): Int? {
+                  if (min(w, h) >= alvo) return null
+                  val alt = if (h > w) (alvo.toDouble() * h / w).roundToInt() else alvo
+                  return alt - alt % 2
+              }
+
+              private fun criarPlano(uri: Uri, op: Opcoes): Plano {
+                  val ent = lerEntrada(uri)
+                  var w = ent.w
+                  var h = ent.h
+                  val efeitos = mutableListOf<Effect>()
+
+                  // 1) Bordas
+                  if (op.bordas) {
+                      val rec = detectarBordas(uri, ent.duracaoMs)
+                      if (rec != null) {
+                          efeitos.add(Crop(-1f + 2f * rec.esq, 1f - 2f * rec.dir, -1f + 2f * rec.base, 1f - 2f * rec.topo))
+                          w = par((w * (1f - rec.esq - rec.dir)).roundToInt())
+                          h = par((h * (1f - rec.base - rec.topo)).roundToInt())
+                          Fila.log("   bordas detectadas e removidas")
+                      } else {
+                          Fila.log("   nenhuma borda para cortar")
+                      }
+                  }
+
+                  // 2) Resolução / formato
+                  var escalou = false
+                  if (op.alvo == -1) {
+                      val layout = if (op.preencher) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
+                      else Presentation.LAYOUT_SCALE_TO_FIT
+                      efeitos.add(Presentation.createForWidthAndHeight(1080, 1920, layout))
+                      w = 1080; h = 1920
+                      escalou = true
+                  } else if (op.alvo > 0) {
+                      val alt = alturaAlvo(w, h, op.alvo)
+                      if (alt != null) {
+                          efeitos.add(Presentation.createForHeight(alt))
+                          w = par((w.toDouble() * alt / h).roundToInt())
+                          h = alt
+                          escalou = true
+                      } else {
+                          Fila.log("   já está nessa resolução ou maior")
+                      }
+                  }
+
+                  // 3) Nitidez
+                  if (op.nitidez && escalou) efeitos.add(NitidezEffect(0.6f))
+
+                  // 4) Logo + legenda (uma camada transparente do tamanho do quadro final)
+                  if (op.logo || op.legenda.isNotBlank()) {
+                      val camada = montarOverlay(w, h, op)
+                      efeitos.add(OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(camada))))
+                  }
+
+                  // 5) Pausas
+                  var segs: List<LongRange>? = null
+                  if (op.pausas) {
+                      segs = detectarFalas(uri, ent.duracaoMs)
+                      if (segs == null) {
+                          Fila.log("   nenhuma pausa longa para cortar")
+                      } else {
+                          val mantido = segs.sumOf { it.last - it.first }
+                          Fila.log("   pausas removidas: ${(ent.duracaoMs - mantido) / 1000}s")
+                      }
+                  }
+                  return Plano(segs, efeitos, w, h)
+              }
+
+              // Procura margens uniformes (pretas ou coloridas) em alguns quadros e devolve quanto cortar.
+              private fun detectarBordas(uri: Uri, duracaoMs: Long): Recorte? {
+                  val r = MediaMetadataRetriever()
+                  try {
+                      r.setDataSource(this, uri)
+                      var minX = 1f; var maxX = 0f; var minY = 1f; var maxY = 0f
+                      var usados = 0
+                      val ent = lerEntrada(uri)
+                      val lw = 320
+                      val lh = max(2, (lw.toDouble() * ent.h / ent.w).roundToInt())
+
+                      for (pct in listOf(10, 30, 50, 70, 90)) {
+                          if (cancelado) throw CancellationException("cancelado")
+                          val bmp = r.getScaledFrameAtTime(
+                              duracaoMs * 1000L * pct / 100, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, lw, lh
+                          ) ?: continue
+                          val bw = bmp.width
+                          val bh = bmp.height
+                          val px = IntArray(bw * bh)
+                          bmp.getPixels(px, 0, bw, 0, 0, bw, bh)
+                          bmp.recycle()
+
+                          val cantos = intArrayOf(px[0], px[bw - 1], px[(bh - 1) * bw], px[bh * bw - 1])
+                          val rr = cantos.sumOf { Color.red(it) } / 4
+                          val gg = cantos.sumOf { Color.green(it) } / 4
+                          val bb = cantos.sumOf { Color.blue(it) } / 4
+                          val cantosIguais = cantos.all {
+                              abs(Color.red(it) - rr) < 40 && abs(Color.green(it) - gg) < 40 && abs(Color.blue(it) - bb) < 40
+                          }
+                          if (!cantosIguais) { // sem moldura uniforme: este quadro usa tudo
+                              minX = 0f; maxX = 1f; minY = 0f; maxY = 1f
+                              usados++
+                              continue
+                          }
+
+                          val colConteudo = IntArray(bw)
+                          val linConteudo = IntArray(bh)
+                          for (y in 0 until bh) for (x in 0 until bw) {
+                              val c = px[y * bw + x]
+                              val diff = max(abs(Color.red(c) - rr), max(abs(Color.green(c) - gg), abs(Color.blue(c) - bb)))
+                              if (diff > 28) { colConteudo[x]++; linConteudo[y]++ }
+                          }
+                          val limCol = max(1, (bh * 0.02f).toInt())
+                          val limLin = max(1, (bw * 0.02f).toInt())
+                          val x0 = colConteudo.indexOfFirst { it >= limCol }
+                          val x1 = colConteudo.indexOfLast { it >= limCol }
+                          val y0 = linConteudo.indexOfFirst { it >= limLin }
+                          val y1 = linConteudo.indexOfLast { it >= limLin }
+                          if (x0 < 0 || y0 < 0) continue // quadro todo uniforme: ignora
+
+                          minX = min(minX, x0.toFloat() / bw)
+                          maxX = max(maxX, (x1 + 1).toFloat() / bw)
+                          minY = min(minY, y0.toFloat() / bh)
+                          maxY = max(maxY, (y1 + 1).toFloat() / bh)
+                          usados++
+                      }
+                      if (usados == 0) return null
+
+                      val esq = minX; val dir = 1f - maxX; val topo = minY; val base = 1f - maxY
+                      if (esq < 0.02f && dir < 0.02f && topo < 0.02f && base < 0.02f) return null
+                      if ((1f - esq - dir) < 0.3f || (1f - topo - base) < 0.3f) return null // suspeito
+                      return Recorte(max(0f, esq), max(0f, dir), max(0f, base), max(0f, topo))
+                  } finally { r.release() }
+              }
+
+              // Decodifica o áudio, mede o volume a cada 50 ms e devolve os trechos com fala (ms).
+              private fun detectarFalas(uri: Uri, duracaoMs: Long): List<LongRange>? {
+                  if (duracaoMs <= 0) return null
+                  val ex = MediaExtractor()
+                  ex.setDataSource(this, uri, null)
+                  var faixa = -1
+                  for (t in 0 until ex.trackCount) {
+                      if (ex.getTrackFormat(t).getString("mime")?.startsWith("audio/") == true) { faixa = t; break }
+                  }
+                  if (faixa < 0) { ex.release(); return null }
+                  ex.selectTrack(faixa)
+                  val fmt = ex.getTrackFormat(faixa)
+                  val codec = MediaCodec.createDecoderByType(fmt.getString("mime")!!)
+
+                  val binMs = 50
+                  val nBins = (duracaoMs / binMs + 2).toInt()
+                  val soma = DoubleArray(nBins)
+                  val cont = LongArray(nBins)
+                  var canais = fmt.getInteger("channel-count")
+                  var taxa = fmt.getInteger("sample-rate")
+                  val info = MediaCodec.BufferInfo()
+
+                  try {
+                      codec.configure(fmt, null, null, 0)
+                      codec.start()
+                      var fimEntrada = false
+                      var fimSaida = false
+                      while (!fimSaida) {
+                          if (cancelado) throw CancellationException("cancelado")
+                          if (!fimEntrada) {
+                              val ii = codec.dequeueInputBuffer(10_000)
+                              if (ii >= 0) {
+                                  val buf = codec.getInputBuffer(ii)!!
+                                  val tam = ex.readSampleData(buf, 0)
+                                  if (tam < 0) {
+                                      codec.queueInputBuffer(ii, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                      fimEntrada = true
+                                  } else {
+                                      codec.queueInputBuffer(ii, 0, tam, ex.sampleTime, 0)
+                                      ex.advance()
+                                  }
+                              }
+                          }
+                          val oi = codec.dequeueOutputBuffer(info, 10_000)
+                          if (oi >= 0) {
+                              val out = codec.getOutputBuffer(oi)!!
+                              val sb = out.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                              val quadros = sb.remaining() / max(1, canais)
+                              val baseMs = info.presentationTimeUs / 1000.0
+                              var f = 0
+                              while (f < quadros) {
+                                  val s = sb.get(f * canais).toDouble()
+                                  val bin = ((baseMs + f * 1000.0 / taxa) / binMs).toInt().coerceIn(0, nBins - 1)
+                                  soma[bin] += s * s
+                                  cont[bin]++
+                                  f += 4
+                              }
+                              codec.releaseOutputBuffer(oi, false)
+                              if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) fimSaida = true
+                          } else if (oi == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                              val novo = codec.outputFormat
+                              canais = novo.getInteger("channel-count")
+                              taxa = novo.getInteger("sample-rate")
+                          }
+                      }
+                  } finally {
+                      try { codec.stop() } catch (_: Exception) { }
+                      codec.release()
+                      ex.release()
+                  }
+
+                  val nivel = DoubleArray(nBins) {
+                      if (cont[it] > 0) 10.0 * log10(max(1e-12, soma[it] / cont[it] / (32768.0 * 32768.0))) else -100.0
+                  }
+                  val validos = nivel.filter { it > -99.0 }.sorted()
+                  if (validos.isEmpty()) return null
+                  val p95 = validos[(validos.size * 0.95).toInt().coerceAtMost(validos.size - 1)]
+                  val limiar = (p95 - 25.0).coerceIn(-55.0, -32.0)
+                  val fala = BooleanArray(nBins) { nivel[it] > limiar }
+
+                  for (gapMs in listOf(600, 1000, 1500, 2500)) {
+                      val segs = montarSegmentos(fala, binMs, gapMs, duracaoMs)
+                      if (segs.isNotEmpty() && segs.size <= 150) {
+                          val mantido = segs.sumOf { it.last - it.first }
+                          return if (mantido >= duracaoMs * 0.93) null else segs
+                      }
+                  }
+                  return null
+              }
+
+              private fun montarSegmentos(fala: BooleanArray, binMs: Int, gapMs: Int, duracaoMs: Long): List<LongRange> {
+                  // trechos contínuos de fala (em bins)
+                  val runs = mutableListOf<IntArray>()
+                  var i = 0
+                  while (i < fala.size) {
+                      if (fala[i]) {
+                          var j = i
+                          while (j + 1 < fala.size && fala[j + 1]) j++
+                          runs.add(intArrayOf(i, j))
+                          i = j + 1
+                      } else i++
+                  }
+                  if (runs.isEmpty()) return emptyList()
+
+                  // junta trechos separados por silêncio curto
+                  val juntos = mutableListOf(runs[0].copyOf())
+                  for (k in 1 until runs.size) {
+                      val ultimo = juntos.last()
+                      if ((runs[k][0] - ultimo[1]) * binMs < gapMs) ultimo[1] = runs[k][1]
+                      else juntos.add(runs[k].copyOf())
+                  }
+
+                  // folga de 150 ms em cada ponta
+                  val segs = mutableListOf<LongRange>()
+                  for (r in juntos) {
+                      val ini = max(0L, r[0].toLong() * binMs - 150)
+                      val fim = min(duracaoMs, (r[1] + 1).toLong() * binMs + 150)
+                      if (fim - ini < 300) continue
+                      val anterior = segs.lastOrNull()
+                      if (anterior != null && ini <= anterior.last) segs[segs.size - 1] = anterior.first..max(fim, anterior.last)
+                      else segs.add(ini..fim)
+                  }
+                  return segs
+              }
+
+              // Camada transparente do tamanho do quadro final com logo (canto superior esquerdo) e legenda.
+              private fun montarOverlay(w: Int, h: Int, op: Opcoes): Bitmap {
+                  val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                  val c = Canvas(bmp)
+                  val lado = min(w, h).toFloat()
+
+                  if (op.logo) {
+                      val logo = BitmapFactory.decodeFile(File(filesDir, "logo.png").path)
+                      if (logo != null) {
+                          val larg = max(1, (w * 0.2f).toInt())
+                          val alt = max(1, (logo.height.toFloat() * larg / logo.width).toInt())
+                          val esc = Bitmap.createScaledBitmap(logo, larg, alt, true)
+                          val margem = lado * 0.04f
+                          c.drawBitmap(esc, margem, margem, Paint(Paint.FILTER_BITMAP_FLAG))
+                      }
+                  }
+
+                  if (op.legenda.isNotBlank()) {
+                      val tp = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                          color = Color.WHITE
+                          textSize = lado * 0.055f
+                          typeface = Typeface.DEFAULT_BOLD
+                          setShadowLayer(textSize * 0.14f, 0f, 0f, Color.BLACK)
+                      }
+                      val larguraTexto = (w * 0.84f).toInt()
+                      val layout = StaticLayout.Builder
+                          .obtain(op.legenda, 0, op.legenda.length, tp, larguraTexto)
+                          .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                          .build()
+                      // Em vertical fica acima da área coberta pelos botões do Reels/TikTok.
+                      val yIdeal = if (h > w) h * 0.66f else h * 0.80f
+                      val y = min(yIdeal, h - layout.height - h * 0.03f)
+                      c.save()
+                      c.translate((w - larguraTexto) / 2f, y)
+                      layout.draw(c)
+                      c.restore()
+                  }
+                  return bmp
+              }
+
+              // ---------- etapas de processamento ----------
+
+              private fun melhorar(
+                  uri: Uri, nome: String, op: Opcoes,
+                  i: Int, n: Int, rotulo: String, proximo: (Boolean) -> Unit
+              ) {
+                  Fila.log("   analisando o vídeo...")
+                  thread {
+                      val plano = try {
+                          criarPlano(uri, op)
+                      } catch (e: CancellationException) {
+                          null
+                      } catch (e: Exception) {
+                          Fila.log("   ERRO: ${e.message}")
+                          null
+                      }
+                      main.post {
+                          when {
+                              plano == null || cancelado -> proximo(false)
+                              plano.vazio -> {
+                                  Fila.log("   nada a alterar; só limpando")
+                                  limparAsync(uri, nome, { f -> progresso(i, n, f, rotulo) }, proximo)
+                              }
+                              else -> exportar(uri, nome, plano, i, n, rotulo, proximo)
+                          }
+                      }
+                  }
+              }
+
+              private fun exportar(
+                  uri: Uri, nome: String, plano: Plano,
+                  i: Int, n: Int, rotulo: String, proximo: (Boolean) -> Unit
+              ) {
+                  Fila.log("   processando (pode demorar)...")
+                  val temp = File(cacheDir, "temp_${System.nanoTime()}.mp4")
+                  tempAtual = temp
+                  val bitrate = (plano.w.toLong() * plano.h * 3.6).toInt().coerceIn(4_000_000, 40_000_000)
+
+                  val itens = plano.segmentos?.map { s ->
+                      val clip = MediaItem.ClippingConfiguration.Builder()
+                          .setStartPositionMs(s.first)
+                          .setEndPositionMs(s.last)
+                          .build()
+                      EditedMediaItem.Builder(
+                          MediaItem.Builder().setUri(uri).setClippingConfiguration(clip).build()
+                      ).build()
+                  } ?: listOf(EditedMediaItem.Builder(MediaItem.fromUri(uri)).build())
+
+                  val composicao = Composition.Builder(listOf(EditedMediaItemSequence(itens)))
+                      .setEffects(Effects(emptyList(), plano.efeitos))
+                      .build()
+
+                  val encoder = DefaultEncoderFactory.Builder(this)
+                      .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(bitrate).build())
+                      .build()
+
+                  val t = Transformer.Builder(this)
+                      .setVideoMimeType(MimeTypes.VIDEO_H264)
+                      .setEncoderFactory(encoder)
+                      .addListener(object : Transformer.Listener {
+                          override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                              polling = false
+                              transformer = null
+                              if (cancelado) { temp.delete(); return }
+                              Fila.log("   limpando metadados...")
+                              limparAsync(Uri.fromFile(temp), nome, { f -> progresso(i, n, 0.9f + 0.1f * f, rotulo) }) { s ->
+                                  temp.delete()
+                                  proximo(s)
+                              }
+                          }
+
+                          override fun onError(
+                              composition: Composition,
+                              exportResult: ExportResult,
+                              exportException: ExportException
+                          ) {
+                              polling = false
+                              transformer = null
+                              temp.delete()
+                              Fila.log("   ERRO: ${exportException.message}")
+                              proximo(false)
+                          }
+                      })
+                      .build()
+
+                  transformer = t
+                  t.start(composicao, temp.absolutePath)
+
+                  polling = true
+                  val holder = ProgressHolder()
+                  main.post(object : Runnable {
+                      override fun run() {
+                          if (!polling) return
+                          val atual = transformer ?: return
+                          if (atual.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE) {
+                              progresso(i, n, 0.9f * holder.progress / 100f, rotulo)
+                          }
+                          main.postDelayed(this, 500)
+                      }
+                  })
+              }
+
+              private fun limparAsync(uri: Uri, nome: String, prog: (Float) -> Unit, fim: (Boolean) -> Unit) {
+                  thread {
+                      val ok = try {
+                          limpar(uri, nome) { f -> main.post { prog(f) } }
+                          Fila.log("   OK")
+                          true
+                      } catch (e: CancellationException) {
+                          Fila.log("   cancelado")
+                          false
+                      } catch (e: Exception) {
+                          Fila.log("   ERRO: ${e.message}")
+                          false
+                      }
+                      main.post { fim(ok) }
+                  }
+              }
+
+              // Remux sem recodificar: copia só vídeo/áudio, sem os metadados.
+              private fun limpar(uri: Uri, nome: String, onProg: (Float) -> Unit) {
+                  val base = nome.substringBeforeLast('.')
+                  val valores = ContentValues().apply {
+                      put(MediaStore.Video.Media.DISPLAY_NAME, "${base}_limpo.mp4")
+                      put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                      put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/Limpos")
+                      put(MediaStore.Video.Media.IS_PENDING, 1)
+                  }
+                  val destino = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, valores)
+                      ?: throw IllegalStateException("não foi possível criar o arquivo")
+
+                  try {
+                      var rotacao = 0
+                      var duracaoUs = 0L
+                      MediaMetadataRetriever().also { r ->
+                          try {
+                              r.setDataSource(this, uri)
+                              rotacao = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                                  ?.toIntOrNull() ?: 0
+                              duracaoUs = (r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                                  ?.toLongOrNull() ?: 0L) * 1000L
+                          } finally { r.release() }
+                      }
+
+                      val extrator = MediaExtractor()
+                      extrator.setDataSource(this, uri, null)
+                      val pfd = contentResolver.openFileDescriptor(destino, "w")
+                          ?: throw IllegalStateException("sem acesso de escrita")
+
+                      pfd.use {
+                          val muxer = MediaMuxer(it.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG4)
+                          try {
+                              val mapa = HashMap<Int, Int>()
+                              for (t in 0 until extrator.trackCount) {
+                                  val formato = extrator.getTrackFormat(t)
+                                  val mime = formato.getString("mime") ?: continue
+                                  if (mime.startsWith("video/") || mime.startsWith("audio/")) {
+                                      mapa[t] = muxer.addTrack(formato)
+                                      extrator.selectTrack(t)
+                                  }
+                              }
+                              if (mapa.isEmpty()) throw IllegalStateException("sem faixas de vídeo/áudio")
+                              muxer.setOrientationHint(rotacao)
+                              muxer.start()
+
+                              val buf = ByteBuffer.allocate(4 * 1024 * 1024)
+                              val info = MediaCodec.BufferInfo()
+                              var ultimo = -1
+                              while (true) {
+                                  if (cancelado) throw CancellationException("cancelado")
+                                  buf.clear()
+                                  val tam = extrator.readSampleData(buf, 0)
+                                  if (tam < 0) break
+                                  info.set(0, tam, extrator.sampleTime, extrator.sampleFlags)
+                                  muxer.writeSampleData(mapa[extrator.sampleTrackIndex]!!, buf, info)
+                                  if (duracaoUs > 0) {
+                                      val pct = (extrator.sampleTime * 100 / duracaoUs).toInt().coerceIn(0, 100)
+                                      if (pct != ultimo) { ultimo = pct; onProg(pct / 100f) }
+                                  }
+                                  extrator.advance()
+                              }
+                              muxer.stop()
+                          } finally {
+                              muxer.release()
+                              extrator.release()
+                          }
+                      }
+
+                      contentResolver.update(destino, ContentValues().apply {
+                          put(MediaStore.Video.Media.IS_PENDING, 0)
+                      }, null, null)
+                  } catch (e: Exception) {
+                      contentResolver.delete(destino, null, null)
+                      throw e
+                  }
+              }
+
+              override fun onDestroy() {
+                  polling = false
+                  wakeLock?.let { if (it.isHeld) it.release() }
+                  super.onDestroy()
+              }
+          }
+          FIM_ARQUIVO
+          cat > build.gradle.kts <<'FIM_ARQUIVO'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          FIM_ARQUIVO
+          cat > gradle.properties <<'FIM_ARQUIVO'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          FIM_ARQUIVO
+          cat > settings.gradle.kts <<'FIM_ARQUIVO'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "LimpadorMetadados"
+          include(":app")
+          FIM_ARQUIVO
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Compilar APK (debug)
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LimpadorMetadados-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
