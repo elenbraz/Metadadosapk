@@ -1,37 +1,25 @@
 package com.exemplo.limpador
 
 import android.Manifest
-import android.app.AlertDialog
-import android.content.ActivityNotFoundException
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.ContentValues
-import android.content.ContentUris
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.MediaStore
-import android.text.InputType
-import android.text.TextUtils
-import android.util.Size
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -39,12 +27,16 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
-import androidx.core.content.IntentCompat
 import androidx.core.widget.doAfterTextChanged
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import java.io.File
-import kotlin.concurrent.thread
 
+@OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
 
     private val fundo = Color.parseColor("#0B1020")
@@ -57,7 +49,6 @@ class MainActivity : ComponentActivity() {
     private val violeta = Color.parseColor("#7C3AED")
     private val azul = Color.parseColor("#2563EB")
     private val verde = Color.parseColor("#34D399")
-    private val perigo = Color.parseColor("#F87171")
 
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -65,14 +56,15 @@ class MainActivity : ComponentActivity() {
     private var tela = ""
     private val pilha = ArrayList<String>()
     private var videos: List<Uri> = emptyList()
-    private var modo = 1080
     private var fNitidez = true
-    private var fPreencher = true
-    private var fBordas = false
-    private var fPausas = false
-    private var fLogo = true
-    private var fArroba = false
-    private var legendaAtual = ""
+
+    private var player: ExoPlayer? = null
+    private var playerView: PlayerView? = null
+
+    private var barraProgresso: ProgressBar? = null
+    private var txtStatusProgresso: TextView? = null
+    private var btnBaixar: Button? = null
+    private var ultimoArquivoProcessado: File? = null
 
     private lateinit var conteudo: LinearLayout
     private lateinit var barraTopo: LinearLayout
@@ -80,7 +72,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var barraVoltar: TextView
 
     private val prefs by lazy { getSharedPreferences("clippure", MODE_PRIVATE) }
-    private val arquivoLogo by lazy { File(filesDir, "logo.png") }
 
     private val permissaoNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -96,6 +87,48 @@ class MainActivity : ComponentActivity() {
             }
             videos = uris
             if (tela == "configurar") mostrar("configurar") else irPara("configurar")
+        }
+    }
+
+    private val salvarDocumento = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("video/mp4")
+    ) { uriTarget ->
+        uriTarget?.let { target ->
+            ultimoArquivoProcessado?.let { origem ->
+                try {
+                    contentResolver.openOutputStream(target)?.use { out ->
+                        origem.inputStream().use { input -> input.copyTo(out) }
+                    }
+                    aviso("Vídeo guardado com sucesso!")
+                } catch (e: Exception) {
+                    aviso("Erro ao guardar o vídeo: ${e.message}")
+                }
+            } ?: aviso("Nenhum vídeo processado disponível para guardar")
+        }
+    }
+
+    private val receiverProgresso = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ProcessamentoService.ACAO_PROGRESSO -> {
+                    val progresso = intent.getIntExtra(ProcessamentoService.EXTRA_PROGRESSO, 0)
+                    barraProgresso?.isIndeterminate = false
+                    barraProgresso?.progress = progresso
+                    txtStatusProgresso?.text = "A limpar e otimizar: $progresso%"
+                }
+                ProcessamentoService.ACAO_CONCLUIDO -> {
+                    val caminho = intent.getStringExtra(ProcessamentoService.EXTRA_CAMINHO_TEMP)
+                    if (caminho != null) {
+                        ultimoArquivoProcessado = File(caminho)
+                        // Atualizar preview com o vídeo limpo
+                        carregarVideoNoPlayer(Uri.fromFile(ultimoArquivoProcessado))
+                    }
+                    barraProgresso?.progress = 100
+                    txtStatusProgresso?.text = "Processamento Concluído! Pronto para baixar."
+                    txtStatusProgresso?.setTextColor(verde)
+                    btnBaixar?.visibility = View.VISIBLE
+                }
+            }
         }
     }
 
@@ -152,18 +185,17 @@ class MainActivity : ComponentActivity() {
         setOnClickListener { acao() }
     }
 
-    private fun btnSec(t: String, cor: Int, compacto: Boolean = false, acao: () -> Unit): Button =
-        Button(this).apply {
-            text = t
-            isAllCaps = false
-            textSize = if (compacto) 13f else 15f
-            typeface = fonte("sans-serif-medium")
-            stateListAnimator = null
-            minHeight = dp(if (compacto) 42 else 50)
-            setTextColor(cor)
-            background = rect(Color.TRANSPARENT, 14, cor)
-            setOnClickListener { acao() }
-        }
+    private fun btnSucesso(t: String, acao: () -> Unit): Button = Button(this).apply {
+        text = t
+        isAllCaps = false
+        textSize = 16f
+        typeface = fonte("sans-serif-medium")
+        stateListAnimator = null
+        minHeight = dp(54)
+        setTextColor(Color.BLACK)
+        background = rect(verde, 14)
+        setOnClickListener { acao() }
+    }
 
     private fun campo(
         dica: String, valor: String, multi: Boolean = false, tipo: Int = 0, aoMudar: (String) -> Unit
@@ -186,14 +218,14 @@ class MainActivity : ComponentActivity() {
     private fun opcao(t: String, desc: String, ligado: Boolean, aoMudar: (Boolean) -> Unit) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, dp(12), 0, dp(12))
+        setPadding(0, dp(10), 0, dp(10))
 
         val textos = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
         }
-        textos.addView(txt(t, 16f, texto, "sans-serif-medium"))
-        textos.addView(txt(desc, 13f, sub))
+        textos.addView(txt(t, 15f, texto, "sans-serif-medium"))
+        textos.addView(txt(desc, 12f, sub))
 
         val sw = Switch(this@MainActivity).apply {
             isChecked = ligado
@@ -219,6 +251,16 @@ class MainActivity : ComponentActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
         ) permissaoNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
+
+        val filter = IntentFilter().apply {
+            addAction(ProcessamentoService.ACAO_PROGRESSO)
+            addAction(ProcessamentoService.ACAO_CONCLUIDO)
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(receiverProgresso, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(receiverProgresso, filter)
+        }
 
         val raiz = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -258,12 +300,39 @@ class MainActivity : ComponentActivity() {
         if (!prefs.getBoolean("boasvindas", false)) mostrar("boasvindas") else entrarNoApp()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        liberarPlayer()
+        try {
+            unregisterReceiver(receiverProgresso)
+        } catch (_: Exception) {}
+    }
+
+    private fun inicializarPlayer(): ExoPlayer {
+        val p = ExoPlayer.Builder(this).build()
+        player = p
+        return p
+    }
+
+    private fun carregarVideoNoPlayer(uri: Uri) {
+        val p = player ?: inicializarPlayer()
+        p.setMediaItem(MediaItem.fromUri(uri))
+        p.prepare()
+        p.playWhenReady = false
+    }
+
+    private fun liberarPlayer() {
+        player?.release()
+        player = null
+    }
+
     private fun irPara(t: String) {
         if (tela.isNotEmpty() && tela != t) pilha.add(tela)
         mostrar(t)
     }
 
     private fun voltar() {
+        liberarPlayer()
         if (pilha.isNotEmpty()) mostrar(pilha.removeAt(pilha.size - 1)) else finish()
     }
 
@@ -274,7 +343,7 @@ class MainActivity : ComponentActivity() {
         barraTopo.visibility = if (semBarra) View.GONE else View.VISIBLE
         conteudo.setPadding(dp(16), dp(if (semBarra) 40 else 8), dp(16), dp(24))
         barraTitulo.text = when (t) {
-            "configurar" -> "Configurar projeto"
+            "configurar" -> "Editor ClipPure"
             "meus" -> "Meus vídeos"
             "marca" -> "Minha marca"
             "sobre" -> "Sobre"
@@ -327,25 +396,84 @@ class MainActivity : ComponentActivity() {
 
     private fun telaConfigurar() {
         val c = conteudo
-        val resumo = cartao()
-        resumo.adicionar(secao("Vídeos"))
-        resumo.adicionar(txt("${videos.size} vídeo(s) selecionado(s)", 17f, texto, "sans-serif-medium"))
-        c.adicionar(resumo, baixo = 12)
 
+        // 1. ÁREA DE PRÉ-VISUALIZAÇÃO (PREVIEW) NO TOPO - CAPCUT STYLE
+        val cartaoPreview = cartao()
+        cartaoPreview.adicionar(secao("Pré-visualização"))
+
+        val pv = PlayerView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(MATCH, dp(220))
+            useController = true
+            background = rect(Color.BLACK, 12)
+        }
+        playerView = pv
+        val exoPlayer = inicializarPlayer()
+        pv.player = exoPlayer
+
+        if (videos.isNotEmpty()) {
+            carregarVideoNoPlayer(videos[0])
+        }
+
+        cartaoPreview.addView(pv)
+        c.adicionar(cartaoPreview, baixo = 14)
+
+        // 2. ÁREA DE FEEDBACK E PROGRESSO
+        val cartaoProgresso = cartao()
+        cartaoProgresso.adicionar(secao("Status de Processamento"))
+
+        val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            layoutParams = LinearLayout.LayoutParams(MATCH, dp(12))
+            progressTintList = ColorStateList.valueOf(ciano)
+            progressBackgroundTintList = ColorStateList.valueOf(linhaCor)
+            max = 100
+            progress = 0
+        }
+        barraProgresso = pb
+
+        val txtStatus = txt("Aguardando início do processamento...", 14f, sub).apply {
+            setPadding(0, dp(8), 0, 0)
+        }
+        txtStatusProgresso = txtStatus
+
+        cartaoProgresso.addView(pb)
+        cartaoProgresso.addView(txtStatus)
+        c.adicionar(cartaoProgresso, baixo = 14)
+
+        // 3. OPÇÕES E CONTROLES DO EDITOR (SCROLLABLE)
         val opcoes = cartao()
-        opcoes.adicionar(secao("Filtros e Melhorias"))
-        opcoes.adicionar(opcao("Nitidez Extra", "Aplica filtro para realçar detalhes do vídeo", fNitidez) { fNitidez = it })
-        opcoes.adicionar(opcao("Limpar Metadados", "Remove GPS, modelo da câmera e rastreadores", true) { })
+        opcoes.adicionar(secao("Configurações do Filtro"))
+        opcoes.adicionar(opcao("Nitidez Extra", "Aplica shader para realçar contornos e detalhes", fNitidez) { fNitidez = it })
+        opcoes.adicionar(opcao("Limpar Metadados", "Remove GPS, câmera e identificadores de rastreio", true) { })
         c.adicionar(opcoes, baixo = 16)
 
-        c.adicionar(btnPrimario("Processar") {
+        // 4. BOTÕES DE AÇÃO: PROCESSAR E BAIXAR VÍDEO
+        c.adicionar(btnPrimario("⚡ PROCESSAR VÍDEO") {
+            if (videos.isEmpty()) {
+                aviso("Selecione pelo menos um vídeo")
+                return@btnPrimario
+            }
+            pb.isIndeterminate = true
+            txtStatus.text = "Iniciando processamento..."
+            txtStatus.setTextColor(texto)
+            btnBaixar?.visibility = View.GONE
+
             val intent = Intent(this, ProcessamentoService::class.java).apply {
                 putStringArrayListExtra("videos", ArrayList(videos.map { it.toString() }))
                 putExtra("nitidez", fNitidez)
             }
             startService(intent)
-            aviso("Processamento iniciado")
-        })
+            aviso("Processamento em segundo plano iniciado!")
+        }, baixo = 10)
+
+        // BOTÃO DE BAIXAR VÍDEO COM STORAGE ACCESS FRAMEWORK
+        val btnB = btnSucesso("⬇ BAIXAR VÍDEO") {
+            val nomeSugerido = "ClipPure_${System.currentTimeMillis()}.mp4"
+            salvarDocumento.launch(nomeSugerido)
+        }.apply {
+            visibility = View.GONE
+        }
+        btnBaixar = btnB
+        c.adicionar(btnB, baixo = 16)
     }
 
     private fun telaMeus() {
