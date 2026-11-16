@@ -183,6 +183,33 @@ class MainActivity : ComponentActivity() {
             doAfterTextChanged { aoMudar(it.toString()) }
         }
 
+    private fun opcao(t: String, desc: String, ligado: Boolean, aoMudar: (Boolean) -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(12), 0, dp(12))
+
+        val textos = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        }
+        textos.addView(txt(t, 16f, texto, "sans-serif-medium"))
+        textos.addView(txt(desc, 13f, sub))
+
+        val sw = Switch(this@MainActivity).apply {
+            isChecked = ligado
+            thumbTintList = ColorStateList.valueOf(if (ligado) ciano else sub)
+            trackTintList = ColorStateList.valueOf(if (ligado) ciano else linhaCor)
+            setOnCheckedChangeListener { _, checked ->
+                thumbTintList = ColorStateList.valueOf(if (checked) ciano else sub)
+                trackTintList = ColorStateList.valueOf(if (checked) ciano else linhaCor)
+                aoMudar(checked)
+            }
+        }
+
+        addView(textos)
+        addView(sw)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = fundo
@@ -304,7 +331,21 @@ class MainActivity : ComponentActivity() {
         resumo.adicionar(secao("Vídeos"))
         resumo.adicionar(txt("${videos.size} vídeo(s) selecionado(s)", 17f, texto, "sans-serif-medium"))
         c.adicionar(resumo, baixo = 12)
-        c.adicionar(btnPrimario("Processar") { aviso("Processamento iniciado") })
+
+        val opcoes = cartao()
+        opcoes.adicionar(secao("Filtros e Melhorias"))
+        opcoes.adicionar(opcao("Nitidez Extra", "Aplica filtro para realçar detalhes do vídeo", fNitidez) { fNitidez = it })
+        opcoes.adicionar(opcao("Limpar Metadados", "Remove GPS, modelo da câmera e rastreadores", true) { })
+        c.adicionar(opcoes, baixo = 16)
+
+        c.adicionar(btnPrimario("Processar") {
+            val intent = Intent(this, ProcessamentoService::class.java).apply {
+                putStringArrayListExtra("videos", ArrayList(videos.map { it.toString() }))
+                putExtra("nitidez", fNitidez)
+            }
+            startService(intent)
+            aviso("Processamento iniciado")
+        })
     }
 
     private fun telaMeus() {
