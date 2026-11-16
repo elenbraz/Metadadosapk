@@ -39,16 +39,17 @@ import java.io.File
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
 
-    private val fundo = Color.parseColor("#0B1020")
-    private val superficie = Color.parseColor("#131A2E")
-    private val superficie2 = Color.parseColor("#1B2440")
-    private val linhaCor = Color.parseColor("#27324F")
-    private val texto = Color.parseColor("#EAF0FF")
+    // Paleta de Cores - Premium Dark Theme / CapCut Style
+    private val fundo = Color.parseColor("#090A0F")
+    private val superficie = Color.parseColor("#131B2E")
+    private val superficie2 = Color.parseColor("#1C2744")
+    private val linhaCor = Color.parseColor("#2A3B5E")
+    private val texto = Color.parseColor("#FFFFFF")
     private val sub = Color.parseColor("#94A3B8")
     private val ciano = Color.parseColor("#22D3EE")
     private val violeta = Color.parseColor("#7C3AED")
     private val azul = Color.parseColor("#2563EB")
-    private val verde = Color.parseColor("#34D399")
+    private val verde = Color.parseColor("#10B981")
 
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -120,7 +121,6 @@ class MainActivity : ComponentActivity() {
                     val caminho = intent.getStringExtra(ProcessamentoService.EXTRA_CAMINHO_TEMP)
                     if (caminho != null) {
                         ultimoArquivoProcessado = File(caminho)
-                        // Atualizar preview com o vídeo limpo
                         carregarVideoNoPlayer(Uri.fromFile(ultimoArquivoProcessado))
                     }
                     barraProgresso?.progress = 100
@@ -161,14 +161,14 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun secao(t: String): TextView =
-        txt(t.uppercase(), 11f, ciano, "sans-serif-medium").apply {
-            letterSpacing = 0.1f
-            setPadding(0, 0, 0, dp(8))
+        txt(t.uppercase(), 12f, ciano, "sans-serif-medium").apply {
+            letterSpacing = 0.12f
+            setPadding(0, 0, 0, dp(10))
         }
 
     private fun cartao(borda: Int = linhaCor): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(14), dp(16), dp(14))
+        setPadding(dp(18), dp(16), dp(18), dp(16))
         background = rect(superficie, 20, borda)
     }
 
@@ -178,10 +178,10 @@ class MainActivity : ComponentActivity() {
         textSize = 16f
         typeface = fonte("sans-serif-medium")
         stateListAnimator = null
-        minHeight = dp(54)
+        minHeight = dp(56)
         setTextColor(Color.WHITE)
         background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(violeta, azul))
-            .apply { cornerRadius = dp(14).toFloat() }
+            .apply { cornerRadius = dp(16).toFloat() }
         setOnClickListener { acao() }
     }
 
@@ -191,9 +191,9 @@ class MainActivity : ComponentActivity() {
         textSize = 16f
         typeface = fonte("sans-serif-medium")
         stateListAnimator = null
-        minHeight = dp(54)
-        setTextColor(Color.BLACK)
-        background = rect(verde, 14)
+        minHeight = dp(56)
+        setTextColor(Color.WHITE)
+        background = rect(verde, 16)
         setOnClickListener { acao() }
     }
 
@@ -210,22 +210,22 @@ class MainActivity : ComponentActivity() {
             else if (multi) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             else InputType.TYPE_CLASS_TEXT
             if (multi) maxLines = 3
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = rect(superficie2, 12, linhaCor)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = rect(superficie2, 14, linhaCor)
             doAfterTextChanged { aoMudar(it.toString()) }
         }
 
     private fun opcao(t: String, desc: String, ligado: Boolean, aoMudar: (Boolean) -> Unit) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, dp(10), 0, dp(10))
+        setPadding(0, dp(12), 0, dp(12))
 
         val textos = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
         }
-        textos.addView(txt(t, 15f, texto, "sans-serif-medium"))
-        textos.addView(txt(desc, 12f, sub))
+        textos.addView(txt(t, 16f, texto, "sans-serif-medium"))
+        textos.addView(txt(desc, 13f, sub).apply { setPadding(0, dp(2), 0, 0) })
 
         val sw = Switch(this@MainActivity).apply {
             isChecked = ligado
@@ -269,23 +269,23 @@ class MainActivity : ComponentActivity() {
         barraTopo = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(28), dp(16), dp(4))
+            setPadding(dp(12), dp(32), dp(16), dp(8))
         }
         barraVoltar = TextView(this).apply {
             text = "←"
-            textSize = 26f
+            textSize = 28f
             setTextColor(texto)
             setPadding(dp(12), dp(4), dp(16), dp(4))
             setOnClickListener { voltar() }
         }
-        barraTitulo = txt("", 18f, texto, "sans-serif-medium")
+        barraTitulo = txt("", 20f, texto, "sans-serif-medium")
         barraTopo.addView(barraVoltar)
         barraTopo.addView(barraTitulo)
         raiz.addView(barraTopo)
 
         conteudo = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(24))
+            setPadding(dp(20), dp(12), dp(20), dp(32))
         }
         raiz.addView(
             ScrollView(this).apply { isFillViewport = true; addView(conteudo) },
@@ -341,7 +341,7 @@ class MainActivity : ComponentActivity() {
         conteudo.removeAllViews()
         val semBarra = t == "inicio" || t == "boasvindas"
         barraTopo.visibility = if (semBarra) View.GONE else View.VISIBLE
-        conteudo.setPadding(dp(16), dp(if (semBarra) 40 else 8), dp(16), dp(24))
+        conteudo.setPadding(dp(20), dp(if (semBarra) 48 else 12), dp(20), dp(32))
         barraTitulo.text = when (t) {
             "configurar" -> "Editor ClipPure"
             "meus" -> "Meus vídeos"
@@ -365,19 +365,19 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_HORIZONTAL
         }
         conteudo.adicionar(c)
-        c.adicionar(txt(getString(R.string.app_name), 34f, texto, "sans-serif-black"), topo = 16)
+        c.adicionar(txt(getString(R.string.app_name), 36f, texto, "sans-serif-black"), topo = 24)
         c.adicionar(
-            txt("Vídeos limpos, nítidos e prontos para postar", 15f, sub).apply { gravity = Gravity.CENTER },
-            topo = 4, baixo = 28
+            txt("Vídeos limpos, nítidos e prontos para postar", 16f, sub).apply { gravity = Gravity.CENTER },
+            topo = 8, baixo = 36
         )
 
         var nome = prefs.getString("nome", "") ?: ""
         val form = cartao()
         form.adicionar(secao("Vamos começar"))
-        form.adicionar(campo("Seu nome", nome) { nome = it })
-        c.adicionar(form, baixo = 16)
+        form.adicionar(campo("Seu nome ou marca", nome) { nome = it })
+        c.adicionar(form, baixo = 24)
 
-        c.adicionar(btnPrimario("Começar") {
+        c.adicionar(btnPrimario("Começar Editor") {
             prefs.edit().putString("nome", nome.trim())
                 .putBoolean("boasvindas", true).apply()
             entrarNoApp()
@@ -388,10 +388,14 @@ class MainActivity : ComponentActivity() {
         val c = conteudo
         val nome = prefs.getString("nome", "") ?: ""
 
-        c.adicionar(txt(if (nome.isNotBlank()) "Olá, $nome" else "Olá", 24f, texto, "sans-serif-medium"))
-        c.adicionar(txt("O que vamos criar hoje?", 15f, sub), baixo = 20)
+        c.adicionar(txt(if (nome.isNotBlank()) "Olá, $nome" else "Olá", 28f, texto, "sans-serif-medium"), topo = 12)
+        c.adicionar(txt("O que vamos criar e limpar hoje?", 16f, sub), baixo = 28)
 
-        c.adicionar(btnPrimario("＋  Novo projeto") { escolher.launch(arrayOf("video/*")) }, baixo = 18)
+        val cardInicio = cartao()
+        cardInicio.adicionar(secao("Novo Projeto"))
+        cardInicio.adicionar(txt("Selecione um ou mais vídeos para remover metadados de rastreio e aplicar melhorias profissionais.", 14f, sub), baixo = 16)
+        cardInicio.adicionar(btnPrimario("＋  Selecionar Vídeos") { escolher.launch(arrayOf("video/*")) })
+        c.adicionar(cardInicio, baixo = 20)
     }
 
     private fun telaConfigurar() {
@@ -399,12 +403,12 @@ class MainActivity : ComponentActivity() {
 
         // 1. ÁREA DE PRÉ-VISUALIZAÇÃO (PREVIEW) NO TOPO - CAPCUT STYLE
         val cartaoPreview = cartao()
-        cartaoPreview.adicionar(secao("Pré-visualização"))
+        cartaoPreview.adicionar(secao("Pré-visualização do Vídeo"))
 
         val pv = PlayerView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(MATCH, dp(220))
+            layoutParams = LinearLayout.LayoutParams(MATCH, dp(240))
             useController = true
-            background = rect(Color.BLACK, 12)
+            background = rect(Color.BLACK, 16)
         }
         playerView = pv
         val exoPlayer = inicializarPlayer()
@@ -415,14 +419,14 @@ class MainActivity : ComponentActivity() {
         }
 
         cartaoPreview.addView(pv)
-        c.adicionar(cartaoPreview, baixo = 14)
+        c.adicionar(cartaoPreview, baixo = 16)
 
         // 2. ÁREA DE FEEDBACK E PROGRESSO
         val cartaoProgresso = cartao()
-        cartaoProgresso.adicionar(secao("Status de Processamento"))
+        cartaoProgresso.adicionar(secao("Progresso do Processamento"))
 
         val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            layoutParams = LinearLayout.LayoutParams(MATCH, dp(12))
+            layoutParams = LinearLayout.LayoutParams(MATCH, dp(14))
             progressTintList = ColorStateList.valueOf(ciano)
             progressBackgroundTintList = ColorStateList.valueOf(linhaCor)
             max = 100
@@ -430,21 +434,21 @@ class MainActivity : ComponentActivity() {
         }
         barraProgresso = pb
 
-        val txtStatus = txt("Aguardando início do processamento...", 14f, sub).apply {
-            setPadding(0, dp(8), 0, 0)
+        val txtStatus = txt("Pronto para iniciar a limpeza e otimização...", 14f, sub).apply {
+            setPadding(0, dp(12), 0, 0)
         }
         txtStatusProgresso = txtStatus
 
         cartaoProgresso.addView(pb)
         cartaoProgresso.addView(txtStatus)
-        c.adicionar(cartaoProgresso, baixo = 14)
+        c.adicionar(cartaoProgresso, baixo = 16)
 
         // 3. OPÇÕES E CONTROLES DO EDITOR (SCROLLABLE)
         val opcoes = cartao()
-        opcoes.adicionar(secao("Configurações do Filtro"))
-        opcoes.adicionar(opcao("Nitidez Extra", "Aplica shader para realçar contornos e detalhes", fNitidez) { fNitidez = it })
-        opcoes.adicionar(opcao("Limpar Metadados", "Remove GPS, câmera e identificadores de rastreio", true) { })
-        c.adicionar(opcoes, baixo = 16)
+        opcoes.adicionar(secao("Configurações Avançadas"))
+        opcoes.adicionar(opcao("Nitidez Extra", "Aplica shader para realçar contornos e detalhes visuais", fNitidez) { fNitidez = it })
+        opcoes.adicionar(opcao("Limpar Metadados", "Remove GPS, modelo da câmera e rastreadores EXIF", true) { })
+        c.adicionar(opcoes, baixo = 20)
 
         // 4. BOTÕES DE AÇÃO: PROCESSAR E BAIXAR VÍDEO
         c.adicionar(btnPrimario("⚡ PROCESSAR VÍDEO") {
@@ -453,7 +457,7 @@ class MainActivity : ComponentActivity() {
                 return@btnPrimario
             }
             pb.isIndeterminate = true
-            txtStatus.text = "Iniciando processamento..."
+            txtStatus.text = "Processando em segundo plano..."
             txtStatus.setTextColor(texto)
             btnBaixar?.visibility = View.GONE
 
@@ -462,32 +466,33 @@ class MainActivity : ComponentActivity() {
                 putExtra("nitidez", fNitidez)
             }
             startService(intent)
-            aviso("Processamento em segundo plano iniciado!")
-        }, baixo = 10)
+            aviso("Processamento iniciado!")
+        }, baixo = 12)
 
         // BOTÃO DE BAIXAR VÍDEO COM STORAGE ACCESS FRAMEWORK
-        val btnB = btnSucesso("⬇ BAIXAR VÍDEO") {
+        val btnB = btnSucesso("⬇ BAIXAR VÍDEO FINAL") {
             val nomeSugerido = "ClipPure_${System.currentTimeMillis()}.mp4"
             salvarDocumento.launch(nomeSugerido)
         }.apply {
             visibility = View.GONE
         }
         btnBaixar = btnB
-        c.adicionar(btnB, baixo = 16)
+        c.adicionar(btnB, baixo = 20)
     }
 
     private fun telaMeus() {
         val c = conteudo
         val v = cartao()
-        v.adicionar(txt("Nenhum vídeo processado ainda", 16f, texto, "sans-serif-medium"))
+        v.adicionar(secao("Histórico"))
+        v.adicionar(txt("Nenhum vídeo processado recentemente nesta sessão.", 15f, sub))
         c.adicionar(v)
     }
 
     private fun telaMarca() {
         val c = conteudo
         val cp = cartao()
-        cp.adicionar(secao("Perfil"))
-        cp.adicionar(campo("Seu nome", prefs.getString("nome", "") ?: "") {
+        cp.adicionar(secao("Perfil de Marca"))
+        cp.adicionar(campo("Seu nome ou marca", prefs.getString("nome", "") ?: "") {
             prefs.edit().putString("nome", it.trim()).apply()
         })
         c.adicionar(cp)
@@ -496,8 +501,8 @@ class MainActivity : ComponentActivity() {
     private fun telaSobre() {
         val c = conteudo
         val cc = cartao()
-        cc.adicionar(secao("Sobre"))
-        cc.adicionar(txt("ClipPure - Limpador de Metadados e Processador de Vídeos", 14f, texto))
+        cc.adicionar(secao("Sobre o ClipPure"))
+        cc.adicionar(txt("ClipPure - Editor e Limpador Profissional de Metadados de Vídeo.\nVersão 1.0 (Dark Premium Edition)", 15f, texto))
         c.adicionar(cc)
     }
 
